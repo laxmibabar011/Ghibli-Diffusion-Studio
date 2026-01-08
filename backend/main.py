@@ -1,5 +1,5 @@
 from fastapi import FastAPI, Depends, HTTPException, status, UploadFile, File, Form, BackgroundTasks, WebSocket, WebSocketDisconnect
-from typing import List
+from typing import List, Optional
 from fastapi.responses import FileResponse
 from fastapi.security import OAuth2PasswordRequestForm
 from fastapi.middleware.cors import CORSMiddleware
@@ -35,6 +35,10 @@ app.mount("/outputs", StaticFiles(directory="outputs"), name="outputs")
 class UserCreate(BaseModel):
     username: str
     password: str
+    first_name: str
+    last_name: str
+    email: str
+    dob: str
 
 class ChatCreate(BaseModel):
     title: str
@@ -42,7 +46,8 @@ class ChatCreate(BaseModel):
 class DrawRequest(BaseModel):
     chat_id: str
     prompt: str
-    guidance: float = 1.5 # Lower guidance for LCM
+    guidance: float = 1.5 
+    id: str = None # Client-generated ID
 
 class ForgotPasswordRequest(BaseModel):
     username: str
@@ -75,10 +80,16 @@ manager = ConnectionManager()
 
 # --- BACKGROUND TASKS ---
 
+import asyncio # Add asyncio import
+
+# ...
+
 async def process_generation_task(task_id: str, prompt: str, chat_id: str, user_id: int, guidance: float):
     # Create a new DB session for the background thread
     db = models.SessionLocal()
+    loop = asyncio.get_event_loop()
     try:
+        print(f"[DEBUG] Processing Task: {task_id} for User: {user_id}")
         task = db.query(models.Task).filter(models.Task.id == task_id).first()
         task.status = "PROCESSING"
         db.commit()
@@ -86,9 +97,12 @@ async def process_generation_task(task_id: str, prompt: str, chat_id: str, user_
         # Notify User
         await manager.send_personal_message({"taskId": task_id, "status": "PROCESSING"}, str(user_id))
         
-        # Generate
-        file_path = generate_image(prompt, guidance=guidance)
+        # Generate (Non-blocking)
+        # We run the blocking synchronous generation in a separate thread
+        print(f"[DEBUG] Starting Generation for Task: {task_id}")
+        file_path = await loop.run_in_executor(None, generate_image, prompt, 6, True, guidance)
         image_url = f"http://localhost:8000/{file_path}"
+        print(f"[DEBUG] Generation Complete. URL: {image_url}")
         
         # Update Task
         task.result = image_url
@@ -117,6 +131,7 @@ async def process_generation_task(task_id: str, prompt: str, chat_id: str, user_
 
 async def process_remix_task(task_id: str, prompt: str, chat_id: str, user_id: int, input_path: str, strength: float, guidance: float):
     db = models.SessionLocal()
+    loop = asyncio.get_event_loop()
     try:
         task = db.query(models.Task).filter(models.Task.id == task_id).first()
         task.status = "PROCESSING"
@@ -129,8 +144,12 @@ async def process_remix_task(task_id: str, prompt: str, chat_id: str, user_id: i
         init_image = Image.open(input_path).convert("RGB")
         init_image = init_image.resize((512, 512))
         
-        # Generate
-        file_path = generate_img2img(prompt, init_image, strength=strength, guidance=guidance)
+        # Generate (Non-blocking)
+        file_path = await loop.run_in_executor(
+            None, 
+            generate_img2img, 
+            prompt, init_image, strength, guidance
+        )
         output_url = f"http://localhost:8000/{file_path}"
         
         # Update Task
@@ -168,7 +187,14 @@ def register(user: UserCreate, db: Session = Depends(models.get_db)):
     
     # Create new user
     hashed_pw = auth.get_password_hash(user.password)
-    new_user = models.User(username=user.username, hashed_password=hashed_pw)
+    new_user = models.User(
+        username=user.username, 
+        hashed_password=hashed_pw,
+        first_name=user.first_name,
+        last_name=user.last_name,
+        email=user.email,
+        dob=user.dob
+    )
     db.add(new_user)
     db.commit()
     return {"msg": "User created successfully"}
@@ -184,7 +210,41 @@ def login(form_data: OAuth2PasswordRequestForm = Depends(), db: Session = Depend
 
 @app.get("/users/me")
 def read_users_me(current_user: models.User = Depends(auth.get_current_user)):
-    return {"id": current_user.id, "username": current_user.username}
+    return {
+        "id": current_user.id, 
+        "username": current_user.username,
+        "first_name": current_user.first_name,
+        "last_name": current_user.last_name,
+        "email": current_user.email,
+        "dob": current_user.dob,
+        "profile_image_url": current_user.profile_image_url
+    }
+
+@app.post("/users/me/avatar")
+async def upload_avatar(
+    file: UploadFile = File(...), 
+    current_user: models.User = Depends(auth.get_current_user), 
+    db: Session = Depends(models.get_db)
+):
+    # Ensure directory exists
+    avatar_dir = "outputs/avatars"
+    os.makedirs(avatar_dir, exist_ok=True)
+    
+    # Save file
+    file_ext = file.filename.split(".")[-1]
+    filename = f"{current_user.id}_{uuid.uuid4()}.{file_ext}"
+    file_path = f"{avatar_dir}/{filename}"
+    
+    with open(file_path, "wb") as f:
+        content = await file.read()
+        f.write(content)
+        
+    # Update DB
+    url = f"http://localhost:8000/{file_path}"
+    current_user.profile_image_url = url
+    db.commit()
+    
+    return {"url": url}
 
 @app.post("/forgot-password")
 def forgot_password(req: ForgotPasswordRequest, db: Session = Depends(models.get_db)):
@@ -217,11 +277,22 @@ def reset_password(req: ResetPasswordRequest, db: Session = Depends(models.get_d
 
 @app.get("/chats")
 def get_chats(current_user: models.User = Depends(auth.get_current_user), db: Session = Depends(models.get_db)):
-    return db.query(models.ChatSession).filter(models.ChatSession.user_id == current_user.id).order_by(models.ChatSession.created_at.desc()).all()
+    return db.query(models.ChatSession).filter(
+        models.ChatSession.user_id == current_user.id,
+        models.ChatSession.is_active == True
+    ).order_by(models.ChatSession.created_at.desc()).all()
 
 @app.post("/chats")
 def create_chat(req: ChatCreate, current_user: models.User = Depends(auth.get_current_user), db: Session = Depends(models.get_db)):
-    new_chat = models.ChatSession(id=str(uuid.uuid4()), title=req.title, user_id=current_user.id)
+    # Sequential Title Generation
+    # Count only ACTIVE chats so numbering 'resets' if previous ones are deleted
+    count = db.query(models.ChatSession).filter(
+        models.ChatSession.user_id == current_user.id,
+        models.ChatSession.is_active == True
+    ).count()
+    title = f"Chat {count + 1}"
+    
+    new_chat = models.ChatSession(id=str(uuid.uuid4()), title=title, user_id=current_user.id)
     db.add(new_chat)
     db.commit()
     db.refresh(new_chat)
@@ -232,7 +303,28 @@ def get_messages(chat_id: str, current_user: models.User = Depends(auth.get_curr
     chat = db.query(models.ChatSession).filter(models.ChatSession.id == chat_id, models.ChatSession.user_id == current_user.id).first()
     if not chat:
         raise HTTPException(status_code=404, detail="Chat not found")
-    return chat.messages
+    
+    # Serialize messages properly - map image_url to image for frontend
+    return [
+        {
+            "id": msg.id,
+            "role": msg.role,
+            "content": msg.content,
+            "image": msg.image_url,  # Frontend expects 'image' not 'image_url'
+            "session_id": msg.session_id
+        }
+        for msg in chat.messages
+    ]
+
+@app.delete("/chats/{chat_id}")
+def delete_chat(chat_id: str, current_user: models.User = Depends(auth.get_current_user), db: Session = Depends(models.get_db)):
+    chat = db.query(models.ChatSession).filter(models.ChatSession.id == chat_id, models.ChatSession.user_id == current_user.id).first()
+    if not chat:
+        raise HTTPException(status_code=404, detail="Chat not found")
+    
+    chat.is_active = False
+    db.commit()
+    return {"msg": "Chat deleted"}
 
 # --- WEBSOCKET ROUTE ---
 @app.websocket("/ws/{client_id}")
@@ -258,7 +350,8 @@ def draw_art(
     db.add(user_msg)
     
     # Create Task
-    task_id = str(uuid.uuid4())
+    task_id = req.id if req.id else str(uuid.uuid4())
+    print(f"[DEBUG] New Draw Request. Task ID: {task_id} (Client-Provided: {bool(req.id)})")
     new_task = models.Task(id=task_id, status="PENDING")
     db.add(new_task)
     db.commit()
@@ -275,6 +368,7 @@ def draw_art(
 async def remix_image(
     background_tasks: BackgroundTasks,
     chat_id: str = Form(...), prompt: str = Form(...), file: UploadFile = File(...),
+    id: Optional[str] = Form(None), # Client-side Task ID
     strength: float = Form(0.55), guidance: float = Form(1.5),
     current_user: models.User = Depends(auth.get_current_user), db: Session = Depends(models.get_db)
 ):
@@ -289,7 +383,7 @@ async def remix_image(
     db.add(models.Message(role="user", content=prompt, image_url=input_url, session_id=chat_id))
     
     # Create Task
-    task_id = str(uuid.uuid4())
+    task_id = id if id else str(uuid.uuid4())
     new_task = models.Task(id=task_id, status="PENDING")
     db.add(new_task)
     db.commit()
@@ -310,11 +404,14 @@ def get_task_status(task_id: str, db: Session = Depends(models.get_db)):
     return {"id": task.id, "status": task.status, "result": task.result}
 
 @app.get("/gallery")
-def get_gallery():
-    files = sorted(
-        [f for f in os.listdir("outputs") if f.endswith(".png") and "input" not in f],
-        key=lambda x: os.path.getmtime(os.path.join("outputs", x)),
-        reverse=True
-    )
-    image_urls = [f"http://localhost:8000/outputs/{f}" for f in files]
+def get_gallery(current_user: models.User = Depends(auth.get_current_user), db: Session = Depends(models.get_db)):
+    # Fetch images from Active Chats only
+    messages = db.query(models.Message).join(models.ChatSession).filter(
+        models.ChatSession.user_id == current_user.id,
+        models.ChatSession.is_active == True,
+        models.Message.image_url != None
+    ).order_by(models.Message.id.desc()).all()
+    
+    # Filter out any empty strings if they exist
+    image_urls = [msg.image_url for msg in messages if msg.image_url]
     return {"images": image_urls}

@@ -348,8 +348,8 @@ This project is licensed under the **MIT License**.
 ## 📧 Support
 
 If you encounter any issues or have questions:
-- 🐛 [Open an issue](https://github.com/yourusername/ghibli-project/issues)
-- 💬 [Start a discussion](https://github.com/yourusername/ghibli-project/discussions)
+- 🐛 [Open an issue](https://github.com/laxmibabar011/ghibli-project/issues)
+- 💬 [Start a discussion](https://github.com/laxmibabar011/ghibli-project/discussions)
 
 ---
 
@@ -362,8 +362,8 @@ If you find this project useful, please consider giving it a star! ⭐
 <div align="center">
   <p>Made with ❤️ by the Ghibli Diffusion Studio Team</p>
   <p>
-    <a href="https://github.com/yourusername/ghibli-project">GitHub</a> •
-    <a href="https://github.com/yourusername/ghibli-project/issues">Issues</a> •
-    <a href="https://github.com/yourusername/ghibli-project/blob/main/LICENSE">License</a>
+    <a href="https://github.com/laxmibabar011/ghibli-project">GitHub</a> •
+    <a href="https://github.com/laxmibabar011/ghibli-project/issues">Issues</a> •
+    <a href="https://github.com/laxmibabar011/ghibli-project/blob/main/LICENSE">License</a>
   </p>
 </div>
